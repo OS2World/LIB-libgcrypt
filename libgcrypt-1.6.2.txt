@@ -1,0 +1,37 @@
+                          Upload Information Template for Hobbes.nmsu.edu
+                          ===============================================
+
+        Archive Filename: libgcrypt-1.6.2.zip
+       Short Description: libgcrypt v1.6.2
+        Long Description: libgcrypt v1.6.2
+Libgcrypt is a general purpose crypto library based on the code
+used in GnuPG.  Libgcrypt depends on the library `libgpg-error',
+which must be installed correctly before Libgcrypt is to be built.
+
+v1.6.2 : Fix time units in tests/benchmark.exe(stopwatch.h)
+         Use a native hihg-resolution timer in tests/bench-slope.c
+
+v1.5.4 : Use OS/2 entropy gatherer in random-fips.c
+
+v1.5.0 : Added OS/2 entropy gatherer
+
+      Proposed directory
+           for placement: /pub/os2/dev/util/
+
+               Your name: KO Myung-Hun
+           Email address: komh@chollian.net
+    Program contact name: (same)
+   Program contact email: (same)
+             Program URL: (none) 
+
+      Would you like the
+   contact email address
+    included in listings? yes
+
+Operating System/Version: 
+ Additional requirements: kLIBC v0.6.5, libgpg-error v1.13
+
+                Replaces: (none)
+
+
+

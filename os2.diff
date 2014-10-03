@@ -1,0 +1,591 @@
+diff --git a/configure.ac b/configure.ac
+index b08c181..3478099 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -214,6 +214,7 @@ LIBGCRYPT_THREAD_MODULES=""
+ print_egd_notice=no
+ have_w32_system=no
+ have_w32ce_system=no
++have_os2_system=no
+ have_pthread=no
+ 
+ 
+@@ -244,8 +245,10 @@ case "${host}" in
+     i?86-emx-os2 | i?86-*-os2*emx)
+         # OS/2 with the EMX environment
+         ac_cv_have_dev_random=no
++        have_os2_system=yes
+         AC_DEFINE(HAVE_DRIVE_LETTERS)
+         AC_DEFINE(HAVE_DOSISH_SYSTEM)
++        LDFLAGS="$LDFLAGS -no-undefined -Zbin-files"
+         ;;
+ 
+     i?86-*-msdosdjgpp*)
+@@ -282,6 +285,11 @@ fi
+ AM_CONDITIONAL(HAVE_W32_SYSTEM, test "$have_w32_system" = yes)
+ AM_CONDITIONAL(HAVE_W32CE_SYSTEM, test "$have_w32ce_system" = yes)
+ 
++if test "$have_os2_system" = yes; then
++   AC_DEFINE(HAVE_OS2_SYSTEM,1, [Defined if we run on an OS/2 API based system])
++fi
++AM_CONDITIONAL(HAVE_OS2_SYSTEM, test "$have_os2_system" = yes)
++
+ 
+ 
+ # A printable OS Name is sometimes useful.
+@@ -1431,6 +1439,11 @@ if test "$random" = "default"; then
+           # Windows random device.
+           random_modules="w32"
+           ;;
++
++        *-emx-os2 | *-*-os2*emx)
++          # OS/2 random device.
++          random_modules="os2"
++          ;;
+         *)
+           # Build everything, allow to select at runtime.
+           random_modules="$auto_random_modules"
+@@ -1919,6 +1932,13 @@ if test "$found" = "1" ; then
+              [Defined if the WindowsCE specific RNG should be used.])
+ fi
+ 
++LIST_MEMBER(os2, $random_modules)
++if test "$found" = "1" ; then
++   GCRYPT_RANDOM="$GCRYPT_RANDOM rndos2.lo"
++   AC_DEFINE(USE_RNDOS2, 1,
++             [Defined if the OS/2 specific RNG should be used.])
++fi
++
+ AC_SUBST([GCRYPT_CIPHERS])
+ AC_SUBST([GCRYPT_PUBKEY_CIPHERS])
+ AC_SUBST([GCRYPT_DIGESTS])
+diff --git a/doc/Makefile.am b/doc/Makefile.am
+index 30330bb..2cf556e 100644
+--- a/doc/Makefile.am
++++ b/doc/Makefile.am
+@@ -24,7 +24,7 @@ EXTRA_DIST = README.apichanges HACKING DCO \
+ 	     yat2m.c
+ 
+ DISTCLEANFILES = gcrypt.cps yat2m-stamp.tmp yat2m-stamp $(myman_pages)
+-CLEANFILES = yat2m
++CLEANFILES = yat2m$(EXEEXT)
+ 
+ BUILT_SOURCES = libgcrypt-modules.eps fips-fsm.eps \
+                 libgcrypt-modules.png fips-fsm.png \
+@@ -41,7 +41,7 @@ myman_pages   = hmac256.1
+ 
+ man_MANS = $(myman_pages)
+ 
+-yat2m: yat2m.c
++yat2m$(EXEEXT): yat2m.c
+ 	$(CC_FOR_BUILD) -o $@ $(srcdir)/yat2m.c
+ 
+ .fig.png:
+@@ -64,7 +64,7 @@ yat2m-stamp: $(myman_sources)
+ 	          `test -f '$$file' || echo '$(srcdir)/'`$$file ; done
+ 	@mv -f yat2m-stamp.tmp $@
+ 
+-yat2m-stamp: yat2m
++yat2m-stamp: yat2m$(EXEEXT)
+ 
+ $(myman_pages) : yat2m-stamp
+ 	@if test -f $@; then :; else \
+diff --git a/random/Makefile.am b/random/Makefile.am
+index c9d587a..08b797d 100644
+--- a/random/Makefile.am
++++ b/random/Makefile.am
+@@ -48,4 +48,5 @@ rndlinux.c \
+ rndegd.c \
+ rndunix.c \
+ rndw32.c  \
+-rndw32ce.c
++rndw32ce.c \
++rndos2.c
+diff --git a/random/rand-internal.h b/random/rand-internal.h
+index 79b23ac..ea8f2e3 100644
+--- a/random/rand-internal.h
++++ b/random/rand-internal.h
+@@ -138,6 +138,12 @@ void _gcry_rndw32ce_gather_random_fast (void (*add)(const void*, size_t,
+                                                     enum random_origins),
+                                         enum random_origins origin );
+ 
++/*-- rndos2.c --*/
++int _gcry_rndos2_gather_random (void (*add) (const void *, size_t,
++                                             enum random_origins),
++                                enum random_origins origin,
++                                size_t length, int level);
++
+ /*-- rndhw.c --*/
+ int _gcry_rndhw_failed_p (void);
+ void _gcry_rndhw_poll_fast (void (*add)(const void*, size_t,
+diff --git a/random/random-csprng.c b/random/random-csprng.c
+index 87235d8..ad299aa 100644
+--- a/random/random-csprng.c
++++ b/random/random-csprng.c
+@@ -1156,6 +1156,11 @@ getfnc_gather_random (void))(void (*)(const void*, size_t,
+   return fnc;
+ #endif
+ 
++#if USE_RNDOS2
++  fnc = _gcry_rndos2_gather_random;
++  return fnc;
++#endif
++
+   log_fatal (_("no entropy gathering module detected\n"));
+ 
+   return NULL; /*NOTREACHED*/
+diff --git a/random/random-fips.c b/random/random-fips.c
+index d00825e..0a9024f 100644
+--- a/random/random-fips.c
++++ b/random/random-fips.c
+@@ -571,6 +571,10 @@ get_entropy (size_t nbytes)
+                                        GCRY_VERY_STRONG_RANDOM);
+     }
+   while (rc >= 0 && entropy_collect_buffer_len < entropy_collect_buffer_size);
++#elif USE_RNDOS2
++  rc = _gcry_rndos2_gather_random (entropy_collect_cb, 0,
++                                   X931_AES_KEYLEN,
++                                   GCRY_VERY_STRONG_RANDOM);
+ #else
+   rc = -1;
+ #endif
+@@ -1005,7 +1009,7 @@ _gcry_rngfips_selftest (selftest_report_func_t report)
+ {
+   gcry_err_code_t ec;
+ 
+-#if defined(USE_RNDLINUX) || defined(USE_RNDW32)
++#if defined(USE_RNDLINUX) || defined(USE_RNDW32) || defined(USE_RNDOS2)
+   {
+     char buffer[8];
+ 
+@@ -1018,7 +1022,7 @@ _gcry_rngfips_selftest (selftest_report_func_t report)
+ 
+   ec = selftest_kat (report);
+ 
+-#else /*!(USE_RNDLINUX||USE_RNDW32)*/
++#else /*!(USE_RNDLINUX||USE_RNDW32||USE_RNDOS2)*/
+   report ("random", 0, "setup", "no entropy gathering module");
+   ec = GPG_ERR_SELFTEST_FAILED;
+ #endif
+diff --git a/random/random-system.c b/random/random-system.c
+index 3962ab8..191cbbe 100644
+--- a/random/random-system.c
++++ b/random/random-system.c
+@@ -163,6 +163,8 @@ get_random (void *buffer, size_t length, int level)
+       rc = _gcry_rndw32_gather_random (read_cb, 0, length, level);
+     }
+   while (rc >= 0 && read_cb_len < read_cb_size);
++#elif USE_RNDOS2
++  rc = _gcry_rndos2_gather_random (read_cb, 0, length, level);
+ #else
+   rc = -1;
+ #endif
+diff --git a/random/rndos2.c b/random/rndos2.c
+new file mode 100644
+index 0000000..6804b5c
+--- /dev/null
++++ b/random/rndos2.c
+@@ -0,0 +1,244 @@
++/* rndos2.c  -  OS/2 entropy gatherer
++ * Copyright (C) 2012 KO Myung-Hun <komh@chollian.net>
++ *
++ * Libgcrypt is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation; either version 2.1 of
++ * the License, or (at your option) any later version.
++ *
++ * Libgcrypt is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <config.h>
++
++#define INCL_DOS
++#define INCL_DOSERRORS
++#include <os2.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#include <sys/ioctl.h>
++#include <net/if.h>
++
++#include "types.h"
++#include "g10lib.h"
++#include "rand-internal.h"
++
++#define ADD( buf, bufsize, origin, remain ) \
++    do { \
++        int n = ( bufsize ) < ( remain ) ? ( bufsize ) : ( remain ); \
++        add( buf, n, origin ); \
++        ( remain ) -= n; \
++    } while( 0 )
++
++#define BUF_SIZE_IFMIB              ( sizeof( struct ifmib ))
++#define BUF_SIZE_REQUESTER          ( sizeof( unsigned long ) * 30 )
++#define BUF_SIZE_SERVER             ( sizeof( unsigned long ) * 17 )
++#define BUF_SIZE_CPUUTIL            ( sizeof( ULONG ) * 8 )
++#define BUF_SIZE_SYS_STATE          ( 64 * 1024 )
++#define BUF_SIZE_SYS_STATE_DELTA    4096
++#define BUF_SIZE_SYS_STATE_MARGIN   1024
++
++static HMODULE hmodTcpIp32;
++static HMODULE hmodNetApi32;
++static HMODULE hmodDosCalls;
++
++static int _System ( *pfnsocket )( int, int, int );
++static int _System ( *pfnos2_ioctl )( int, unsigned long, char *, int );
++static int _System ( *pfnsoclose )( int );
++
++static unsigned APIENTRY ( *pfnNet32StatisticsGet2 )(
++                                const unsigned char *, const unsigned char *,
++                                unsigned long, unsigned long, unsigned long,
++                                unsigned char *, unsigned long,
++                                unsigned long * );
++
++static APIRET APIENTRY ( *pfnDosPerfSysCall )( ULONG, ULONG, ULONG, ULONG );
++static APIRET APIENTRY ( *pfnDosQuerySysState )( ULONG, ULONG, PID, TID, PVOID,
++                                                 ULONG );
++
++int
++_gcry_rndos2_gather_random( void ( *add )( const void *, size_t,
++                                           enum random_origins ),
++                            enum random_origins origin, size_t length,
++                            int level )
++{
++    static BOOL    fInit = FALSE;
++    static ULONG   ulCpuCount = 1;
++
++    unsigned char *buf;
++    ULONG          rc;
++
++    if( !level )
++        return 0;
++
++    /* We never block, assume level 2. */
++
++    if( !fInit )
++    {
++        CHAR szFail[ 260 ];
++
++        if( !DosLoadModule( szFail, sizeof( szFail ), "tcpip32",
++                            &hmodTcpIp32 ))
++        {
++            rc = DosQueryProcAddr( hmodTcpIp32, 16, NULL,
++                                   ( PFN * )&pfnsocket );
++
++            if( !rc )
++                rc = DosQueryProcAddr( hmodTcpIp32, 17, NULL,
++                                       ( PFN * )&pfnsoclose );
++
++            if( !rc )
++                rc = DosQueryProcAddr( hmodTcpIp32, 200, NULL,
++                                       ( PFN * )&pfnos2_ioctl );
++
++            if( rc )
++            {
++                DosFreeModule( hmodTcpIp32 );
++
++                hmodTcpIp32 = NULLHANDLE;
++            }
++        }
++        else
++            hmodTcpIp32 = NULLHANDLE;
++
++        if( !DosLoadModule( szFail, sizeof( szFail ), "netapi32",
++                            &hmodNetApi32 ))
++        {
++            if( DosQueryProcAddr( hmodNetApi32, 125, NULL,
++                                  ( PFN * )&pfnNet32StatisticsGet2 ))
++            {
++                DosFreeModule( hmodNetApi32 );
++
++                hmodNetApi32 = NULLHANDLE;
++            }
++        }
++        else
++            hmodNetApi32 = NULLHANDLE;
++
++        pfnDosPerfSysCall   = NULL;
++        pfnDosQuerySysState = NULL;
++        if( !DosLoadModule( szFail, sizeof( szFail ), "doscalls",
++                            &hmodDosCalls ))
++        {
++            if( !DosQueryProcAddr( hmodDosCalls, 976, NULL,
++                                   ( PFN * )&pfnDosPerfSysCall ))
++                /* Query CPU count */
++                pfnDosPerfSysCall( 0x41, 0, ( ULONG )&ulCpuCount, 0 );
++
++            DosQueryProcAddr( hmodDosCalls, 368, NULL,
++                              ( PFN * )&pfnDosQuerySysState );
++
++            if( !pfnDosPerfSysCall && !pfnDosQuerySysState )
++                DosFreeModule( hmodDosCalls );
++        }
++
++        fInit = TRUE;
++    }
++
++    while( length )
++    {
++        if( pfnDosPerfSysCall )
++        {
++            buf = xcalloc( ulCpuCount, BUF_SIZE_CPUUTIL );
++
++            /* Query CPU utilization snapshot */
++            if( !pfnDosPerfSysCall( 0x63, ( ULONG )buf, 0, 0 ))
++                ADD( buf, BUF_SIZE_CPUUTIL * ulCpuCount, origin, length );
++
++            xfree( buf );
++        }
++
++        if( hmodTcpIp32 )
++        {
++            int s;
++
++            s = pfnsocket( PF_INET, SOCK_RAW, 0 );
++
++            if( s != -1 )
++            {
++                buf = xmalloc( BUF_SIZE_IFMIB );
++
++                if( !pfnos2_ioctl( s, SIOSTATIF, ( caddr_t )buf,
++                                   BUF_SIZE_IFMIB ))
++                    ADD( buf, BUF_SIZE_IFMIB, origin, length );
++
++                xfree( buf );
++
++                pfnsoclose( s );
++            }
++        }
++
++        if( hmodNetApi32 )
++        {
++            ULONG ulAvail;
++
++            buf = xmalloc( BUF_SIZE_REQUESTER );
++
++            if( !pfnNet32StatisticsGet2( NULL, "REQUESTER", 0, 0, 1, buf,
++                                         BUF_SIZE_REQUESTER, &ulAvail ))
++                ADD( buf, BUF_SIZE_REQUESTER, origin, length );
++
++            xfree( buf );
++
++            buf = xmalloc( BUF_SIZE_SERVER );
++
++            if( !pfnNet32StatisticsGet2( NULL, "SERVER", 0, 0, 1, buf,
++                                         BUF_SIZE_SERVER, &ulAvail ))
++                ADD( buf, BUF_SIZE_SERVER, origin, length );
++
++            xfree( buf );
++        }
++
++        if( pfnDosQuerySysState )
++        {
++            size_t bufSize = BUF_SIZE_SYS_STATE;
++
++            /* Allocate additional memory because DosQuerySysState()
++               sometimes seems to overwrite to a memory boundary. */
++            buf = xmalloc( bufSize + BUF_SIZE_SYS_STATE_MARGIN );
++
++            do
++            {
++                /* Query all the system information supported by OS */
++                rc = pfnDosQuerySysState( QS_SUPPORTED, 0, 0, 0, ( PCHAR )buf,
++                                          bufSize );
++                if( rc == ERROR_BUFFER_OVERFLOW )
++                {
++                    bufSize += BUF_SIZE_SYS_STATE_DELTA;
++                    xfree( buf );
++                    buf = xmalloc( bufSize + BUF_SIZE_SYS_STATE_MARGIN );
++                }
++            } while( rc == ERROR_BUFFER_OVERFLOW );
++
++            if( !rc )
++                ADD( buf, bufSize, origin, length );
++
++            xfree( buf );
++        }
++
++#define ADD_QSV( ord ) \
++    do { \
++        ULONG ulSV; \
++        DosQuerySysInfo( ord, ord, &ulSV, sizeof( ulSV )); \
++        ADD( &ulSV, sizeof( ulSV ), origin, length ); \
++    } while( 0 )
++
++        /* Fail safe */
++        ADD_QSV( QSV_MS_COUNT );
++        ADD_QSV( QSV_TIME_LOW );
++        ADD_QSV( QSV_TIME_HIGH );
++        ADD_QSV( QSV_TOTAVAILMEM );
++        ADD_QSV( QSV_FOREGROUND_FS_SESSION );
++        ADD_QSV( QSV_FOREGROUND_PROCESS );
++    }
++
++    return 0;
++}
+diff --git a/src/global.c b/src/global.c
+index 6f9cbf9..46bd734 100644
+--- a/src/global.c
++++ b/src/global.c
+@@ -287,6 +287,9 @@ print_config ( int (*fnc)(FILE *fp, const char *format, ...), FILE *fp)
+ #if USE_RNDW32
+                 "w32:"
+ #endif
++#if USE_RNDOS2
++                "os2:"
++#endif
+        "\n");
+   fnc (fp, "cpu-arch:"
+ #if defined(HAVE_CPU_ARCH_X86)
+diff --git a/src/hmac256.c b/src/hmac256.c
+index 94a26da..1543b7c 100644
+--- a/src/hmac256.c
++++ b/src/hmac256.c
+@@ -52,7 +52,10 @@
+ #include <string.h>
+ #include <assert.h>
+ #include <errno.h>
+-#if defined(__WIN32) && defined(STANDALONE)
++#if (defined(__WIN32) || defined(__OS2__)) && defined(STANDALONE)
++# ifdef __OS2__
++#  include <io.h>
++# endif
+ # include <fcntl.h> /* We need setmode().  */
+ #endif
+ 
+@@ -650,7 +653,7 @@ main (int argc, char **argv)
+   int use_binary = 0;
+ 
+   assert (sizeof (u32) == 4);
+-#ifdef __WIN32
++#if defined(__WIN32) || defined(__OS2__)
+   setmode (fileno (stdin), O_BINARY);
+ #endif
+ 
+@@ -699,7 +702,7 @@ main (int argc, char **argv)
+       exit (1);
+     }
+ 
+-#ifdef __WIN32
++#if defined(__WIN32) || defined(__OS2__)
+   if (use_binary)
+     setmode (fileno (stdout), O_BINARY);
+ #endif
+diff --git a/tests/bench-slope.c b/tests/bench-slope.c
+index bd05064..5754c4c 100644
+--- a/tests/bench-slope.c
++++ b/tests/bench-slope.c
+@@ -122,6 +122,54 @@ get_time_nsec_diff (struct nsec_time *start, struct nsec_time *end)
+ 
+   return nsecs;
+ }
++#elif defined(__OS2__)
++#define INCL_DOS
++#include <os2.h>
++
++struct nsec_time
++{
++  union
++  {
++    unsigned long long ullTime;
++    QWORD qwTime;
++  };
++};
++
++static void
++get_nsec_time (struct nsec_time *t)
++{
++  APIRET rc;
++
++  rc = DosTmrQueryTime (&t->qwTime);
++  assert (rc == 0);
++}
++
++static double
++get_time_nsec_diff (struct nsec_time *start, struct nsec_time *end)
++{
++  static double nsecs_per_count = 0.0;
++  double nsecs;
++
++  if (nsecs_per_count == 0.0)
++    {
++      ULONG ulFreq;
++      APIRET rc;
++
++      /* Get counts per second. */
++      rc = DosTmrQueryFreq (&ulFreq);
++      assert (rc == 0);
++
++      nsecs_per_count = 1.0 / ulFreq;
++      nsecs_per_count *= 1000000.0 * 1000.0;	/* sec => nsec */
++
++      assert (nsecs_per_count > 0.0);
++    }
++
++  nsecs = end->ullTime - start->ullTime;	/* counts */
++  nsecs *= nsecs_per_count;	/* counts * (nsecs / count) => nsecs */
++
++  return nsecs;
++}
+ #elif defined(HAVE_CLOCK_GETTIME)
+ struct nsec_time
+ {
+diff --git a/tests/fipsdrv.c b/tests/fipsdrv.c
+index eef2ddd..e14b0a2 100644
+--- a/tests/fipsdrv.c
++++ b/tests/fipsdrv.c
+@@ -29,6 +29,10 @@
+ #ifdef HAVE_W32_SYSTEM
+ # include <fcntl.h> /* We need setmode().  */
+ #else
++# ifdef HAVE_DOSISH_SYSTEM
++#  include <io.h>       /* We need setmode().   */
++#  include <fcntl.h>    /* We need O_BINARY     */
++# endif
+ # include <signal.h>
+ #endif
+ #include <assert.h>
+diff --git a/tests/stopwatch.h b/tests/stopwatch.h
+index bdca9ce..83d21f9 100644
+--- a/tests/stopwatch.h
++++ b/tests/stopwatch.h
+@@ -52,10 +52,7 @@ start_timer (void)
+ #endif
+   stopped_at = started_at;
+ #else
+-  struct tms tmp;
+-
+-  times (&tmp);
+-  started_at = stopped_at = tmp.tms_utime;
++  started_at = stopped_at = clock ();
+ #endif
+ }
+ 
+@@ -73,10 +70,7 @@ stop_timer (void)
+                    &stopped_at.kernel_time, &stopped_at.user_time);
+ #endif
+ #else
+-  struct tms tmp;
+-
+-  times (&tmp);
+-  stopped_at = tmp.tms_utime;
++  stopped_at = clock ();
+ #endif
+ }
+ 
+@@ -99,7 +93,7 @@ elapsed_time (void)
+   snprintf (buf, sizeof buf, "%5.0fms", (double)t );
+ #else
+   snprintf (buf, sizeof buf, "%5.0fms",
+-            (((double) (stopped_at - started_at))/CLOCKS_PER_SEC)*10000000);
++            (((double) (stopped_at - started_at))/CLOCKS_PER_SEC)*1000);
+ #endif
+   return buf;
+ }
